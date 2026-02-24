@@ -81,6 +81,10 @@ function reportConsole(verdicts: SkillVerdict[], verbose: boolean): void {
         console.log(`    ${chalk.dim("•")} ${chalk.dim(warning)}`);
       }
     }
+    if (verdict.skillNotActivated) {
+      console.log();
+      console.log(`  ${chalk.red.bold("⚠️  SKILL NOT ACTIVATED")} — the tested skill was not loaded or invoked by the agent`);
+    }
     if (verdict.scenarios.length > 0) {
       console.log();
       for (const scenario of verdict.scenarios) {
@@ -138,6 +142,23 @@ function reportScenarioDetail(
     console.log(
       `      ${chalk.dim(label.padEnd(20))} ${color(formatDelta(displayValue).padEnd(10))} ${chalk.dim(absolute)}`
     );
+  }
+
+  // Skill activation info
+  if (scenario.skillActivation) {
+    console.log();
+    if (scenario.skillActivation.activated) {
+      const parts: string[] = [];
+      if (scenario.skillActivation.detectedSkills.length > 0) {
+        parts.push(scenario.skillActivation.detectedSkills.join(", "));
+      }
+      if (scenario.skillActivation.extraTools.length > 0) {
+        parts.push(`extra tools: ${scenario.skillActivation.extraTools.join(", ")}`);
+      }
+      console.log(`      ${chalk.dim("Skill activated:")} ${chalk.green(parts.join("; ") || "yes")}`);
+    } else {
+      console.log(`      ${chalk.yellow("⚠️  Skill was NOT activated")}`);
+    }
   }
 
   // Full judge output
@@ -300,17 +321,23 @@ export function generateMarkdownSummary(
   config?: { model?: string; judgeModel?: string }
 ): string {
   let md = "## Skill Validation Results\n\n";
-  md += "| Skill | Scenario | Baseline | With Skill | Δ | Verdict |\n";
-  md += "|-------|----------|----------|------------|---|---------|\n";
+  md += "| Skill | Scenario | Baseline | With Skill | Δ | Skills Loaded | Verdict |\n";
+  md += "|-------|----------|----------|------------|---|---------------|--------|\n";
   for (const v of verdicts) {
+    const skillNotActivated = !!v.skillNotActivated;
     for (const s of v.scenarios) {
-      const base = s.baseline?.judgeResult?.overallScore?.toFixed(1) ?? "—";
-      const skill = s.withSkill?.judgeResult?.overallScore?.toFixed(1) ?? "—";
-      const delta = (
-        (s.withSkill?.judgeResult?.overallScore ?? 0) -
-        (s.baseline?.judgeResult?.overallScore ?? 0)
-      ).toFixed(1);
-      const deltaStr = Number(delta) > 0 ? `+${delta}` : delta;
+      const baseScore = s.baseline?.judgeResult?.overallScore;
+      const skillScore = s.withSkill?.judgeResult?.overallScore;
+      const base = (typeof baseScore === "number" && !Number.isNaN(baseScore)) ? baseScore.toFixed(1) : "—";
+      const skill = (typeof skillScore === "number" && !Number.isNaN(skillScore)) ? skillScore.toFixed(1) : "—";
+      let deltaStr = "—";
+      if (typeof baseScore === "number" && !Number.isNaN(baseScore) && typeof skillScore === "number" && !Number.isNaN(skillScore)) {
+        const delta = skillScore - baseScore;
+        if (!Number.isNaN(delta)) {
+          const deltaFixed = delta.toFixed(1);
+          deltaStr = delta > 0 ? `+${deltaFixed}` : deltaFixed;
+        }
+      }
       const icon =
         s.improvementScore != null
           ? s.improvementScore > 0
@@ -321,7 +348,25 @@ export function generateMarkdownSummary(
           : v.passed
           ? "✅"
           : "❌";
-      md += `| ${v.skillName} | ${s.scenarioName} | ${base}/5 | ${skill}/5 | ${deltaStr} | ${icon} |\n`;
+      // Skill activation info
+      let skillsCol = "—";
+      if (s.skillActivation) {
+        if (s.skillActivation.activated) {
+          const parts: string[] = [];
+          if (s.skillActivation.detectedSkills && s.skillActivation.detectedSkills.length > 0) {
+            parts.push(...s.skillActivation.detectedSkills);
+          }
+          if (s.skillActivation.extraTools && s.skillActivation.extraTools.length > 0) {
+            parts.push("tools: " + s.skillActivation.extraTools.join(", "));
+          }
+          skillsCol = parts.length > 0 ? "✅ " + parts.join("; ") : "✅";
+        } else {
+          skillsCol = "⚠️ NOT ACTIVATED";
+        }
+      } else if (skillNotActivated) {
+        skillsCol = "⚠️ NOT ACTIVATED";
+      }
+      md += `| ${v.skillName} | ${s.scenarioName} | ${base}/5 | ${skill}/5 | ${deltaStr} | ${skillsCol} | ${icon} |\n`;
     }
   }
   md += `\nModel: ${config?.model ?? "unknown"} | Judge: ${config?.judgeModel ?? "unknown"}\n`;

@@ -10,6 +10,7 @@ import { pairwiseJudge } from "./pairwise-judge.js";
 import { compareScenario, computeVerdict } from "./comparator.js";
 import { reportResults, generateMarkdownSummary } from "./reporter.js";
 import { analyzeSkill, formatProfileLine, formatProfileWarnings } from "./skill-profile.js";
+import { extractSkillActivation } from "./metrics.js";
 import type {
   ValidatorConfig,
   ReporterSpec,
@@ -19,6 +20,7 @@ import type {
   ScenarioComparison,
   PairwiseJudgeResult,
   EvalScenario,
+  SkillActivationInfo,
 } from "./types.js";
 import type { ModelInfo } from "@github/copilot-sdk";
 
@@ -283,6 +285,7 @@ export async function run(config: ValidatorConfig): Promise<number> {
         baseline: RunResult;
         withSkill: RunResult;
         pairwise: PairwiseJudgeResult | undefined;
+        skillActivation: SkillActivationInfo;
       }> => {
         const runTag = config.runs > 1
           ? (singleScenario ? `[${skill.name}/${runIndex + 1}]` : `[${skill.name}/${scenario.name}/${runIndex + 1}]`)
@@ -393,11 +396,30 @@ export async function run(config: ValidatorConfig): Promise<number> {
           }
         }
 
+        // Extract skill activation info
+        const skillActivation = extractSkillActivation(
+          withSkillMetrics.events,
+          baselineMetrics.toolCallBreakdown
+        );
+
+        if (skillActivation.activated) {
+          const parts: string[] = [];
+          if (skillActivation.detectedSkills.length > 0) {
+            parts.push(`skills: ${skillActivation.detectedSkills.join(', ')}`);
+          }
+          if (skillActivation.extraTools.length > 0) {
+            parts.push(`extra tools: ${skillActivation.extraTools.join(', ')}`);
+          }
+          runLog(`🔌 Skill activated (${parts.join('; ')})`);
+        } else {
+          runLog(chalk.yellow(`⚠️  Skill was NOT activated during this run`));
+        }
+
         if (config.verbose) {
           runLog(`✓ complete`);
         }
 
-        return { baseline, withSkill: withSkillResult, pairwise };
+        return { baseline, withSkill: withSkillResult, pairwise, skillActivation };
       };
 
       // Run all iterations (parallel if parallelRuns > 1)
@@ -447,6 +469,18 @@ export async function run(config: ValidatorConfig): Promise<number> {
       );
       comparison.perRunScores = perRunScores;
 
+      // Aggregate skill activation info across all runs
+      const allActivations = runResults.map((r) => r.skillActivation);
+      const anyActivated = allActivations.some((a) => a.activated);
+      const allDetectedSkills = [...new Set(allActivations.flatMap((a) => a.detectedSkills))];
+      const allExtraTools = [...new Set(allActivations.flatMap((a) => a.extraTools))];
+      comparison.skillActivation = {
+        activated: anyActivated,
+        detectedSkills: allDetectedSkills,
+        extraTools: allExtraTools,
+        skillEventCount: allActivations.reduce((sum, a) => sum + a.skillEventCount, 0),
+      };
+
       return comparison;
     };
 
@@ -463,6 +497,17 @@ export async function run(config: ValidatorConfig): Promise<number> {
       config.confidenceLevel
     );
     verdict.profileWarnings = profile.warnings;
+    // Check skill activation across scenarios
+    const notActivatedScenarios = comparisons.filter(
+      (c) => c.skillActivation && !c.skillActivation.activated
+    );
+    if (notActivatedScenarios.length > 0) {
+      const names = notActivatedScenarios.map((c) => c.scenarioName).join(", ");
+      log(chalk.yellow(`\u26a0\ufe0f  Skill was NOT activated in scenario(s): ${names}`));
+      verdict.skillNotActivated = true;
+      verdict.passed = false;
+      verdict.reason += ` [SKILL NOT ACTIVATED in ${notActivatedScenarios.length} scenario(s): ${names}]`;
+    }
     log(`${verdict.passed ? "✅" : "❌"} Done (score: ${(verdict.overallImprovementScore * 100).toFixed(1)}%)`);
     return verdict;
   };
