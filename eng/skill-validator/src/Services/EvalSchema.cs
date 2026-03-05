@@ -19,6 +19,9 @@ public static class EvalSchema
         var scenarios = raw.Scenarios?.Select(ParseScenario).ToList()
             ?? throw new InvalidOperationException("Eval config must have scenarios");
 
+        if (scenarios.Count == 0)
+            throw new InvalidOperationException("Eval config must have at least one scenario");
+
         return new EvalConfig(scenarios);
     }
 
