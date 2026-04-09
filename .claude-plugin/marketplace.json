@@ -1,0 +1,13 @@
+{
+  "name": "viktorhofer-agent-skills",
+  "owner": {
+    "name": "Me, myself and I - Viktor Hofer"
+  },
+  "plugins": [
+    {
+      "name": "makita-deal-finder",
+      "source": "./plugins/makita-deal-finder",
+      "description": "Find the best Makita power tool deals in Austria using Geizhals price history API, willhaben.at, and eBay.de. Tracks 18V LXT and 40V XGT solo tools against all-time low prices."
+    }
+  ]
+}

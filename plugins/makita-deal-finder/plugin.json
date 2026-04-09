@@ -1,0 +1,7 @@
+{
+  "name": "makita-deal-finder",
+  "version": "1.0.0",
+  "description": "Find the best Makita power tool deals in Austria using Geizhals price history API, willhaben.at, and eBay.de. Tracks 18V LXT and 40V XGT solo tools against all-time low prices.",
+  "skills": ["./skills/"],
+  "agents": ["./agents/"]
+}
