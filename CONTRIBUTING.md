@@ -377,6 +377,40 @@ can run the same tool the workflow uses:
 dotnet run eng/release/sync-version.cs -- 1.0.99
 ```
 
+### Branch protection prerequisite (one-time setup)
+
+The release workflow pushes the version-bump commit directly to `main`.
+On a protected branch (e.g., `dotnet/skills` has a `Main Protection`
+ruleset that requires PRs and status checks), this push will be rejected
+unless a **bypass actor** is configured.
+
+We use a dedicated **GitHub App** as the bypass actor, mirroring how
+[github/gh-aw](https://github.com/github/gh-aw) handles its automation
+(`secrets.GH_AW_GITHUB_TOKEN`). One-time setup by a repo admin:
+
+1. **Create a GitHub App** (Organization Settings → Developer settings →
+   GitHub Apps → New). Name it something like `dotnet-skills-release-bot`.
+   Disable **Webhook** (not needed). Required **repository permissions**:
+   - **Contents** — Read and write (push commits and tags)
+   - **Metadata** — Read-only (default)
+2. **Install** the App on the repo (e.g., `dotnet/skills`).
+3. **Generate a private key** for the App and download the `.pem` file.
+4. **Add repository secrets** in Settings → Secrets and variables → Actions:
+   - `RELEASE_BOT_APP_ID` — the App's numeric ID (shown on the App
+     settings page)
+   - `RELEASE_BOT_PRIVATE_KEY` — the entire contents of the `.pem` file
+     (including `-----BEGIN/END-----` lines)
+5. **Add the App to the ruleset's bypass list** (Settings → Rules →
+   `Main Protection` → Bypass list → Add bypass → select the App, mode
+   `Always`). This lets the App push the bump commit and the tag in one
+   atomic operation; humans pushing to `main` still go through PRs.
+
+The release workflow uses
+[`actions/create-github-app-token`](https://github.com/actions/create-github-app-token)
+to mint a short-lived (~1 hour) installation token from these secrets at
+runtime. Tokens are scoped to the single repository the App is installed
+on; nothing persists.
+
 ### Nightly preview releases
 
 The separate [`skill-validator` workflow](.github/workflows/skill-validator.yml)
