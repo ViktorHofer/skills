@@ -322,3 +322,64 @@ Skills and agents in this repo should be:
 
 Changes to `eng/skill-validator` or the `.github/workflows/evaluation*.yml` workflows must be made from a branch in the `dotnet/skills` repository (i.e., not from a fork). This is a security measure.
 For pull requests from forks, the evaluation workflow (triggered via `/evaluate`) always uses the workflow YAML from the default branch of `dotnet/skills` and builds the validator from that default-branch checkout, so any changes to these files in the forked PR will be ignored during evaluation.
+
+## Releasing
+
+This repository uses a single repo-wide semver version (`vMAJOR.MINOR.PATCH`)
+that drives both the `Microsoft.DotNet.SkillValidator` NuGet package version
+and the `version` field in every `plugins/*/plugin.json`.
+
+### How a release is cut
+
+Releases are produced by the [`release` workflow](.github/workflows/release.yml).
+Trigger it manually via **Actions → release → Run workflow** with two inputs:
+
+- **`release_type`** — `patch` (default), `minor`, or `major`. The workflow
+  computes the next version from the latest existing release tag and
+  increments according to this choice.
+- **`prerelease`** — `true` (default) marks the GitHub release as a
+  pre-release; uncheck to publish a stable release (`--latest=true`).
+
+The workflow:
+
+1. Computes the next tag (e.g., `v1.0.1`) from the latest existing release.
+2. Runs `dotnet run eng/release/sync-version.cs -- <version>` to update
+   `<Version>` in `eng/skill-validator/src/SkillValidator.csproj` and the
+   `version` field in every `plugins/*/plugin.json`.
+3. Commits the bump to `main` as `chore: release vX.Y.Z [skip ci]`.
+4. Tags the bump commit and pushes the tag.
+5. Builds skill-validator across all RIDs (reusable
+   [`skill-validator-build.yml`](.github/workflows/skill-validator-build.yml)
+   workflow).
+6. Creates the GitHub release with `--generate-notes`, attaching the NuGet
+   packages and tar.gz archives.
+
+### When to use which `release_type`
+
+- **`patch`** — bug fixes, doc-only changes, internal refactoring,
+  small skill updates with no breaking change.
+- **`minor`** — new skills, new agents, new plugins, new
+  skill-validator features that don't break consumers.
+- **`major`** — breaking changes to the skill-validator CLI or to
+  plugin.json schema; use sparingly.
+
+### Manual editing of version fields
+
+The `<Version>` element in `SkillValidator.csproj` and the `version`
+fields in `plugins/*/plugin.json` are **owned by the release workflow**.
+Do not edit them by hand in a regular PR — your edit will be overwritten
+by the next release, and your PR will fight the release commit.
+
+If you ever need to bootstrap or repair the version state locally, you
+can run the same tool the workflow uses:
+
+```bash
+dotnet run eng/release/sync-version.cs -- 1.0.99
+```
+
+### Nightly preview releases
+
+The separate [`skill-validator` workflow](.github/workflows/skill-validator.yml)
+continues to publish a rolling `skill-validator-nightly` GitHub release on a
+daily schedule. That stream is independent of the versioned release stream
+and is intended for always-latest preview consumption.

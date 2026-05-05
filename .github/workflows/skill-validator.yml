@@ -15,10 +15,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
-env:
-  RETENTION_DAYS: ${{ (github.event_name == 'schedule' || inputs.create_release) && 90 || 5 }}
-  AGNOSTIC_RID: linux-x64
-
 jobs:
   discover:
     if: github.event_name == 'pull_request'
@@ -38,7 +34,7 @@ jobs:
           $head = "${{ github.event.pull_request.head.sha }}"
           $mergeBase = git merge-base $base $head
           $changed = git diff --name-only $mergeBase $head |
-            Where-Object { $_ -match '^(eng/skill-validator/|\.github/workflows/skill-validator\.yml$)' -and $_ -notmatch '^eng/skill-validator/src/(README\.md|docs/)' } |
+            Where-Object { $_ -match '^(eng/skill-validator/|\.github/workflows/skill-validator(-build)?\.yml$)' -and $_ -notmatch '^eng/skill-validator/src/(README\.md|docs/)' } |
             Select-Object -First 1
           if ($changed) {
             echo "has_changes=true" >> $env:GITHUB_OUTPUT
@@ -55,88 +51,9 @@ jobs:
       always() &&
       !(github.event_name == 'schedule' && github.event.repository.fork) &&
       (needs.discover.result == 'skipped' || needs.discover.outputs.has_changes == 'true')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            rid: linux-x64
-          - os: ubuntu-24.04-arm
-            rid: linux-arm64
-          - os: windows-latest
-            rid: win-x64
-          - os: windows-11-arm
-            rid: win-arm64
-          - os: macos-latest
-            rid: osx-arm64
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5
-        with:
-          global-json-file: global.json
-
-      - name: Build
-        run: dotnet build eng/skill-validator/SkillValidator.slnx /bl:artifacts/logs/build.binlog
-
-      - name: Test
-        run: dotnet test --solution eng/skill-validator/SkillValidator.slnx --no-build /bl:artifacts/logs/test.binlog
-
-      - name: Pack RID-specific NuGet package
-        run: dotnet pack eng/skill-validator/src/SkillValidator.csproj --use-current-runtime /bl:artifacts/logs/pack-rid.binlog
-
-      - name: Upload RID-specific NuGet package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: skill-validator-${{ matrix.rid }}
-          path: artifacts/package/release/Microsoft.DotNet.SkillValidator.${{ matrix.rid }}.*.nupkg
-          archive: false
-          retention-days: ${{ env.RETENTION_DAYS }}
-          if-no-files-found: error
-
-      - name: Create tar.gz archive
-        shell: bash
-        run: |
-          mkdir -p artifacts/assets
-          tar -czf artifacts/assets/skill-validator-${{ matrix.rid }}.tar.gz -C artifacts/publish/SkillValidator/release .
-
-      - name: Upload tar.gz archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: skill-validator-${{ matrix.rid }}.tar.gz
-          path: artifacts/assets/skill-validator-${{ matrix.rid }}.tar.gz
-          archive: false
-          retention-days: ${{ env.RETENTION_DAYS }}
-          if-no-files-found: error
-
-      - name: Pack RID-agnostic NuGet package
-        if: matrix.rid == env.AGNOSTIC_RID
-        run: dotnet pack eng/skill-validator/src/SkillValidator.csproj /bl:artifacts/logs/pack-agnostic.binlog
-
-      - name: Upload RID-agnostic NuGet package
-        if: matrix.rid == env.AGNOSTIC_RID
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          archive: false
-          name: skill-validator
-          path: |
-            artifacts/package/release/Microsoft.DotNet.SkillValidator.*.nupkg
-            !artifacts/package/release/Microsoft.DotNet.SkillValidator.${{ env.AGNOSTIC_RID }}.*.nupkg
-          retention-days: ${{ env.RETENTION_DAYS }}
-          if-no-files-found: error
-
-      - name: Upload binlogs
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: binlogs-${{ matrix.rid }}
-          path: artifacts/logs/*.binlog
-          retention-days: ${{ env.RETENTION_DAYS }}
-          if-no-files-found: ignore
+    uses: ./.github/workflows/skill-validator-build.yml
+    with:
+      retention_days: ${{ (github.event_name == 'schedule' || inputs.create_release) && 90 || 5 }}
 
   release:
     if: >-
@@ -191,3 +108,4 @@ jobs:
           else
             echo "Build and tests passed"
           fi
+

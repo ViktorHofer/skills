@@ -1,0 +1,107 @@
+name: skill-validator-build
+
+# Reusable workflow that builds, tests, packs, and uploads skill-validator
+# artifacts (NuGet packages and self-contained tar.gz archives) across all
+# supported RIDs. Called by both skill-validator.yml (PR/nightly) and
+# release.yml (versioned releases).
+
+on:
+  workflow_call:
+    inputs:
+      retention_days:
+        description: 'Artifact retention in days'
+        type: number
+        default: 5
+      ref:
+        description: 'Git ref to check out (commit SHA, tag, or branch). Defaults to the workflow trigger ref.'
+        type: string
+        default: ''
+
+env:
+  AGNOSTIC_RID: linux-x64
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+          - os: windows-latest
+            rid: win-x64
+          - os: windows-11-arm
+            rid: win-arm64
+          - os: macos-latest
+            rid: osx-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build eng/skill-validator/SkillValidator.slnx /bl:artifacts/logs/build.binlog
+
+      - name: Test
+        run: dotnet test --solution eng/skill-validator/SkillValidator.slnx --no-build /bl:artifacts/logs/test.binlog
+
+      - name: Pack RID-specific NuGet package
+        run: dotnet pack eng/skill-validator/src/SkillValidator.csproj --use-current-runtime /bl:artifacts/logs/pack-rid.binlog
+
+      - name: Upload RID-specific NuGet package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: skill-validator-${{ matrix.rid }}
+          path: artifacts/package/release/Microsoft.DotNet.SkillValidator.${{ matrix.rid }}.*.nupkg
+          archive: false
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: error
+
+      - name: Create tar.gz archive
+        shell: bash
+        run: |
+          mkdir -p artifacts/assets
+          tar -czf artifacts/assets/skill-validator-${{ matrix.rid }}.tar.gz -C artifacts/publish/SkillValidator/release .
+
+      - name: Upload tar.gz archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: skill-validator-${{ matrix.rid }}.tar.gz
+          path: artifacts/assets/skill-validator-${{ matrix.rid }}.tar.gz
+          archive: false
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: error
+
+      - name: Pack RID-agnostic NuGet package
+        if: matrix.rid == env.AGNOSTIC_RID
+        run: dotnet pack eng/skill-validator/src/SkillValidator.csproj /bl:artifacts/logs/pack-agnostic.binlog
+
+      - name: Upload RID-agnostic NuGet package
+        if: matrix.rid == env.AGNOSTIC_RID
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          archive: false
+          name: skill-validator
+          path: |
+            artifacts/package/release/Microsoft.DotNet.SkillValidator.*.nupkg
+            !artifacts/package/release/Microsoft.DotNet.SkillValidator.${{ env.AGNOSTIC_RID }}.*.nupkg
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: error
+
+      - name: Upload binlogs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: binlogs-${{ matrix.rid }}
+          path: artifacts/logs/*.binlog
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: ignore

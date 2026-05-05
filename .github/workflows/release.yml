@@ -1,0 +1,224 @@
+name: release
+
+# Versioned release of the skill-validator NuGet package and tar.gz archives.
+# Bumps <Version> in SkillValidator.csproj and "version" in every plugin.json
+# in a single commit, tags it, builds, and publishes a GitHub release.
+#
+# This workflow OWNS the version fields in csproj and plugin.json — do not
+# hand-edit them.
+#
+# Modeled on github/gh-aw's release workflow:
+# https://github.com/github/gh-aw/blob/main/.github/workflows/release.md
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Semver bump type'
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      prerelease:
+        description: 'Mark as pre-release (uncheck for stable release)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  compute-version:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.compute.outputs.release_tag }}
+      release_version: ${{ steps.compute.outputs.release_version }}
+    steps:
+      - name: Compute next version
+        id: compute
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const releaseType = context.payload.inputs.release_type;
+            core.info(`Computing next version for release type: ${releaseType}`);
+
+            const parseSemver = (tag) => {
+              const m = tag.match(/^v?(\d+)\.(\d+)\.(\d+)$/);
+              if (!m) return null;
+              return {
+                tag,
+                major: parseInt(m[1], 10),
+                minor: parseInt(m[2], 10),
+                patch: parseInt(m[3], 10),
+              };
+            };
+
+            // Pull both releases and git tags. Tags are the authoritative
+            // source — a tag may exist without a release if a previous run
+            // failed mid-publish, and we still want to bump from it.
+            const { data: releases } = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const releaseTags = releases.map(r => r.tag_name);
+
+            const tagRefs = await github.paginate(
+              github.rest.git.listMatchingRefs,
+              { owner: context.repo.owner, repo: context.repo.repo, ref: 'tags/v', per_page: 100 },
+            );
+            const gitTags = tagRefs.map(r => r.ref.replace(/^refs\/tags\//, ''));
+
+            const allTags = [...new Set([...releaseTags, ...gitTags])];
+            const sorted = allTags
+              .map(parseSemver)
+              .filter(v => v !== null)
+              .sort((a, b) => {
+                if (a.major !== b.major) return b.major - a.major;
+                if (a.minor !== b.minor) return b.minor - a.minor;
+                return b.patch - a.patch;
+              });
+
+            if (sorted.length === 0) {
+              core.setFailed('No existing semver releases or tags found. Create an initial vX.Y.Z tag manually first.');
+              return;
+            }
+
+            const latest = sorted[0];
+            core.info(`Latest version: ${latest.tag} (from ${releaseTags.includes(latest.tag) ? 'release' : 'git tag only'})`);
+
+            let { major, minor, patch } = latest;
+            switch (releaseType) {
+              case 'major': major += 1; minor = 0; patch = 0; break;
+              case 'minor': minor += 1; patch = 0; break;
+              case 'patch': patch += 1; break;
+              default:
+                core.setFailed(`Unknown release_type: ${releaseType}`);
+                return;
+            }
+
+            const releaseVersion = `${major}.${minor}.${patch}`;
+            const releaseTag = `v${releaseVersion}`;
+            core.info(`Computed release tag: ${releaseTag}`);
+
+            // Sanity: make sure the new tag doesn't collide.
+            if (releases.find(r => r.tag_name === releaseTag)) {
+              core.setFailed(`Release ${releaseTag} already exists.`);
+              return;
+            }
+            if (gitTags.includes(releaseTag)) {
+              core.setFailed(`Git tag ${releaseTag} already exists (without a release). Delete it before retrying.`);
+              return;
+            }
+
+            core.setOutput('release_tag', releaseTag);
+            core.setOutput('release_version', releaseVersion);
+
+  bump-and-tag:
+    needs: compute-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      bump_sha: ${{ steps.tag.outputs.bump_sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          ref: main
+
+      - uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5
+        with:
+          global-json-file: global.json
+
+      - name: Sync version in csproj and plugin.json files
+        env:
+          RELEASE_VERSION: ${{ needs.compute-version.outputs.release_version }}
+        run: dotnet run eng/release/sync-version.cs -- "$RELEASE_VERSION"
+
+      - name: Commit, tag, and push (atomic)
+        id: tag
+        env:
+          RELEASE_TAG: ${{ needs.compute-version.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.compute-version.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            # Recovery path: a previous run already bumped main to this
+            # version but failed before pushing the tag. Tag the existing
+            # HEAD commit instead of refusing to release.
+            echo "::warning::No source changes from sync-version.cs. Assuming previous bump commit on main is already at ${RELEASE_VERSION}; tagging HEAD."
+          else
+            git add -A
+            git commit -m "chore: release ${RELEASE_TAG} [skip ci]"
+          fi
+
+          git tag "${RELEASE_TAG}"
+
+          # Push commit and tag atomically — both refs land or neither does.
+          # Avoids the half-pushed state that would otherwise wedge a retry.
+          git push --atomic origin main "refs/tags/${RELEASE_TAG}"
+
+          BUMP_SHA=$(git rev-parse HEAD)
+          echo "bump_sha=${BUMP_SHA}" >> "$GITHUB_OUTPUT"
+          echo "✓ Tagged ${RELEASE_TAG} at ${BUMP_SHA}"
+
+  build:
+    needs: [compute-version, bump-and-tag]
+    uses: ./.github/workflows/skill-validator-build.yml
+    with:
+      retention_days: 90
+      ref: ${{ needs.compute-version.outputs.release_tag }}
+
+  publish:
+    needs: [compute-version, bump-and-tag, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.compute-version.outputs.release_tag }}
+          persist-credentials: false
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: release-assets
+          merge-multiple: true
+          # Skip binlogs — only pull packages and archives.
+          pattern: 'skill-validator*'
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.compute-version.outputs.release_tag }}
+          IS_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # The tag was already pushed by bump-and-tag; --target is not needed.
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            gh release create "${RELEASE_TAG}" \
+              release-assets/*.nupkg release-assets/*.tar.gz \
+              --title "${RELEASE_TAG}" \
+              --generate-notes \
+              --prerelease
+          else
+            gh release create "${RELEASE_TAG}" \
+              release-assets/*.nupkg release-assets/*.tar.gz \
+              --title "${RELEASE_TAG}" \
+              --generate-notes \
+              --latest=true
+          fi
+          echo "✓ Released ${RELEASE_TAG} (prerelease=${IS_PRERELEASE})"
